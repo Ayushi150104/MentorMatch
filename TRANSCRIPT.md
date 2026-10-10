@@ -1,1357 +1,440 @@
-PART 1: Project Setup and ArchitectureI want to build a full-stack web application called MentorMatch. 
+# AI Session Transcript — Codeyoung Assignment
 
- 
+**Candidate:** Ayushi Choudhary
+**Institute:** Swami Vivekananda Institute of Science & Technology (SVIST)
+**Assignment:** Full-Stack Engineer — Trial Class Booking System
+**AI assistant:** DeepSeek (chat.deepseek.com)
 
-PROJECT OBJECTIVE: 
+## Note on AI usage
 
-Build a web application where parents can browse mentors 
+As encouraged by the brief, I used DeepSeek as an AI pair-programmer throughout this task. The transcript below is grouped by feature area. Intermediate iterations — repeated file pastes, one-line fixes, and abandoned approaches — have been summarized. The reasoning and design decisions are reproduced in full.
 
-and book trial classes for their children. 
+All credentials, connection strings, and API keys have been redacted.
 
- 
+---
 
-TECHNOLOGY STACK: 
+## PART 1 — Project Setup and Architecture
 
-- Frontend: React.js with Vite 
+**Prompt:**
+I want to build a full-stack web application called MentorMatch. Parents browse mentors and book trial classes for their children. React/Vite frontend, Node/Express backend, MongoDB with Mongoose, JWT auth with bcrypt, timezone-aware scheduling, email notifications, responsive CSS.
 
-- Backend: Node.js and Express.js 
+Project objective: parents pick a time slot, the system assigns an available mentor, and both parties receive an email with a link to a live class.
 
-- Database: MongoDB with Mongoose 
+Requirements:
+1. Parents register and log in.
+2. Mentors register and log in.
+3. Parents browse mentors.
+4. Parents book trial classes.
+5. Parents and mentors receive notifications.
+6. All times handled correctly across time zones.
+7. A mentor conducts at most two demo classes per day.
+8. A clear error state when no mentor is available.
 
-- Authentication: JWT and bcrypt 
+Do not build everything at once. Start with the folder structure, health check, and run instructions.
 
-- Email notifications: Nodemailer 
+**Response:**
+Scaffolded the backend and frontend.
 
-- Date and time handling: IANA time zones and a reliable 
+Backend structure:
 
-  timezone-aware date/time library 
+- `src/server.js` — boots the app: validates env, connects to MongoDB, awaits index initialization, starts listening. Registers SIGINT/SIGTERM handlers for graceful shutdown.
+- `src/app.js` — Express app, CORS, JSON body parsing (1 MB limit), route mounting, 404 handler, and a centralized error handler that maps Mongoose validation/cast errors and duplicate-key errors to appropriate 4xx codes.
+- `src/config/environment.js` — `validateEnvironment()` fails fast if `MONGODB_URI` or `JWT_SECRET` is missing, if the URI scheme isn't `mongodb://` / `mongodb+srv://`, or if `JWT_SECRET` is shorter than 32 chars.
+- `src/config/database.js` — `connectDatabase()` connects and awaits `model.init()` on all four models so unique indexes exist before requests are served.
+- `src/constants.js` — supported timezones, booking limits, class duration.
 
-- Styling: Tailwind CSS or a clean responsive CSS design 
+Frontend: React + Vite. `App.jsx` acts as the top-level orchestrator; feature sections live in `src/components/`.
 
- 
+`GET /api/health` returns `{ status, service, database }` — `200` when MongoDB is connected, `503` otherwise.
 
-PROJECT STRUCTURE: 
+Run locally:
+- Backend: `cd backend && npm install && npm run dev` → `http://localhost:5000`
+- Frontend: `cd frontend && npm install && npm run dev` → `http://localhost:5173`
 
-Create separate frontend and backend folders. 
+---
 
-Organize the backend into routes, controllers, models, 
+## PART 2 — Authentication (Parent and Mentor)
 
-middleware, services and configuration. 
+**Prompt:**
+Implement secure authentication for two roles: parent and mentor. Store name, email, hashed password, and timezone. Use bcrypt for hashing, JWT for sessions. Prevent unauthorized role assignment. Return appropriate HTTP status codes. Never store plaintext passwords. On the frontend: registration and login screens, validation errors displayed, and a session that survives a page refresh.
 
- 
+**Response:**
+Two separate Mongoose models — `Parent` and `Mentor` — rather than a single `User` with a `role` field. This keeps role-specific fields on the appropriate schema (mentor: `bio`, `subjects`, `availability`, `timezone`; parent: `timezone`) and avoids a document with many optional fields that only apply to one role.
 
-REQUIREMENTS: 
+Passwords: `bcryptjs` with 12 salt rounds. `validatePassword()` enforces 8–72 bytes (bcrypt silently truncates past 72). `passwordHash` is `select: false` — it never leaves the database unless explicitly requested.
 
-1. Parents can register and log in. 
+Registration accepts `{ name, email, password, timezone }`. The email is normalized (lowercased, trimmed) and checked against both collections. `timezone` is validated against the runtime's IANA list and falls back to `"UTC"` if missing or invalid.
 
-2. Mentors can register and log in. 
+JWT payload includes `sub`, `role`, `name`, and `timezone`. This lets the client restore a session without a server round-trip on every page load. Expiry is 12 hours.
 
-3. Parents can browse available mentors. 
+`requireAuth` verifies the token and re-validates that `sub` and `role` are present — a signed token with missing claims is still rejected. `requireRole(...roles)` is a middleware factory: `requireRole("parent")` returns middleware that 403s if the authenticated user's role isn't in the list. Failure responses are deliberately generic (`401 INVALID_TOKEN`) so an attacker can't distinguish "expired" from "bad signature" from "wrong role".
 
-4. Mentors can configure their availability. 
+Frontend: `AuthScreen.jsx` handles both register and login. On register, the browser's IANA timezone is detected via `Intl.DateTimeFormat().resolvedOptions().timeZone` and sent with the payload. The JWT is written to `localStorage` before `onAuthenticated` fires, so a session is never shown before its token exists.
 
-5. Parents can book trial classes. 
+### Session restore on refresh
 
-6. Mentors can accept or reject booking requests. 
+The JWT is decoded client-side on mount (`decodeJwtPayload`) and used to repopulate `session` from `localStorage`. A `restoring` state gates the first render — the app shows a neutral loading screen instead of flashing the home screen to a user who is about to be signed in.
 
-7. Both parents and mentors receive booking notifications. 
+This is safe because the client never trusts the token for authorization; the server re-verifies on every API call. The client-side expiry check is a UX nicety — it avoids rendering a dashboard that will immediately 401. If the token is tampered with, the next API call fails and the user is signed out.
 
-8. All dates and times must be handled correctly across 
+`signOut` clears `localStorage` before resetting state; otherwise the restore effect on the next page load would sign the user straight back in.
 
-   different time zones. 
+---
 
-9. A mentor can conduct at most two demo classes per day. 
+## PART 3 — Mentor Profiles and Availability
 
-10. Handle unavailable mentors with a clear error message. 
+**Prompt:**
+Implement mentor profiles and availability. Mentors can edit their profile and IANA time zone and configure weekly availability in their own local time. Parents can browse available mentors, view profiles, and see trial-class slots in their own local time zone. Validate dates, times, and availability on the backend. Do not allow bookings in the past.
 
- 
+**Response:**
+Mentor schema additions: `bio`, `subjects` (array of strings, at least one required), `timezone` (IANA name), `availability` (array of `{ dayOfWeek, startTime, endTime }`), `active` (boolean).
 
-Do not implement everything in one step. 
+Availability is stored as **recurring weekly windows**, not per-date slots. `dayOfWeek` is 1–7 (Mon–Sun), `startTime` and `endTime` are `HH:MM` local-time strings validated by a regex and interpreted in the mentor's timezone at slot-generation time.
 
- 
+Slot generation lives in `utils/time.js` → `buildAvailableSlots({ date, timezone, windows, bookedSlots, now })`. It walks each window in 60-minute increments, produces a `Temporal.ZonedDateTime` for each slot start in the mentor's zone, and filters out:
 
-First: 
+- Slots in the past (compared against `Temporal.Now.instant()`).
+- Slots that overlap an existing active booking (`[start, end)` half-open interval check).
+- Slots on a date where the daily capacity is already exhausted.
 
-- Create the folder structure. 
+Each generated slot carries `startsAt` and `endsAt` as Temporal instants, `localStartTime` (mentor-local `HH:MM`), and `offset` (the resolved UTC offset for that date, e.g. `+05:30`).
 
-- Set up the frontend and backend. 
+`assertWithinAvailability(mentor, localBooking)` validates on the write path that any incoming booking's local time falls inside a declared window for that weekday, that it starts on the 60-minute grid (`offset % CLASS_DURATION_MINUTES === 0`), and that the full class fits inside the window.
 
-- Configure environment variables. 
+Endpoints:
 
-- Install the necessary dependencies. 
+- `GET /api/mentors` — public. Search (`search` on `name`, `bio`, `subjects`), filter (`subject`), paginated. Only `name bio subjects timezone availability active` are returned; `email` and `passwordHash` are never exposed.
+- `GET /api/mentors/:mentorId` — public single-mentor read.
+- `GET /api/mentors/:mentorId/availability?date=YYYY-MM-DD` — public. Returns `windows`, `bookedSlots`, `availableSlots`, `activeBookingCount`, and `remainingDailyBookings` for the given mentor-local date.
 
-- Add a basic health-check endpoint. 
 
-- Explain how to run both applications. 
+---
 
- 
+## PART 4 — Time-Zone Conversion and Daylight Saving Time
 
-Do not hardcode credentials or API secrets. 
+**Prompt:**
+Handle timezone conversion and DST rigorously. Store booking instants in UTC. Store each user's IANA timezone separately. Interpret mentor availability in the mentor's zone and display slots in the parent's zone. Handle DST automatically. Handle ambiguous and nonexistent local times around DST transitions. Prevent double-booking across viewers in different zones. Do not hardcode offsets.
 
-Explain every file created or modified. 
+Test cases: India → New York (standard and daylight), India → London (standard and BST), dates just before and after DST transitions, an ambiguous fall-back time, and a nonexistent spring-forward time.
 
- 
+**Response:**
+Every instants and timezone conversion goes through `Temporal.ZonedDateTime` from `@js-temporal/polyfill`. The polyfill carries the IANA tz database, so `America/New_York` resolves to `-05:00` (EST) in January and `-04:00` (EDT) in July from the same input and the same zone name. No fixed offsets anywhere in the codebase.
 
- 
+Storage:
 
-RESPONSE 
+- `startsAt`, `endsAt` → UTC `Date`.
+- `timezone` → the mentor's IANA zone at creation time.
+- `localDate` → mentor-local `YYYY-MM-DD`, denormalized so the daily-capacity query is cheap.
+- `localStartTime` → mentor-local `HH:MM`.
 
- 
+`parseStartAt(value, timezone)` accepts only ISO 8601 strings with `Z` or an explicit offset (`OFFSET_DATE_TIME` regex). Offset-less strings are rejected — accepting them would let a client send "2026-10-15T09:00" and have the server interpret it in its own local zone, silently shifting the booking.
 
-Created the Express backend with an organized `src` structure. Authentication, mentor availability, bookings, time-zone rules, demo limits, and email sending are not implemented yet; their dependencies and module folders are ready for later steps. 
+**DST handling in `buildAvailableSlots`:**
 
- 
+`Temporal.ZonedDateTime` gives two disambiguation options — `"earlier"` and `"later"` — for wall-clock times that map to zero or two instants.
 
-**Files Created** 
+- **Spring-forward (nonexistent hour).** For a candidate slot, we try both disambiguations and check that the resulting `ZonedDateTime`, when converted back to `PlainDateTime`, equals the original local time. On a spring-forward day, one wall-clock hour doesn't exist; the round-trip check fails for it and the slot is silently dropped. No invalid slot ever reaches the parent.
+- **Fall-back (duplicated hour).** Both disambiguations round-trip to the same wall-clock time. We keep the `"earlier"` instant and add it to a `seenInstants` set; the `"later"` instant is deduplicated by the set. The hour appears exactly once in the slot list.
 
-- `package.json`: Backend scripts and dependencies, including Express, Mongoose, bcrypt, JWT, Nodemailer, and Luxon. 
+**Supported zones** come from `Intl.supportedValuesOf("timeZone")` rather than a hardcoded array. This is deliberate — during development we hit a real bug where the browser sent `Asia/Calcutta` while the hardcoded list contained `Asia/Kolkata`. Node's `Intl` canonicalizes some India zones to `Asia/Calcutta` and some to `Asia/Kolkata` depending on the ICU build. Backing the list with `Intl.supportedValuesOf` makes the runtime's own list authoritative and eliminates the whole class of alias mismatch bugs.
 
-- `package-lock.json`: Generated dependency lockfile. 
+**Verified manually:**
 
-- `.env.example`: Environment variable template; it contains placeholders, not real credentials. 
+```
+node -e "
+const { Temporal } = require('@js-temporal/polyfill');
+for (const d of ['2030-01-15T15:00:00Z','2030-07-15T15:00:00Z']) {
+  console.log(d, '->', Temporal.Instant.from(d).toZonedDateTimeISO('America/New_York').toString());
+}
+"
+```
 
-- `README.md`: Backend setup, run instructions, and folder overview. 
+Output:
 
-- `.gitignore`: Excludes environment files, dependencies, and build output. 
+```
+2030-01-15T15:00:00Z -> 2030-01-15T10:00:00-05:00[America/New_York]
+2030-07-15T15:00:00Z -> 2030-07-15T11:00:00-04:00[America/New_York]
+```
 
-- `app.js`: Express app, middleware, and health route registration. 
+Same UTC instant, same zone name, different offsets — DST applied per date, no special-casing.
 
-- `server.js`: Starts the HTTP server and MongoDB connection. 
+The UI and email paths were also verified end to end: booking a 09:00 slot with a New York mentor in January showed 19:30 India time; booking the same 09:00 slot in July showed 18:30 India time — a one-hour shift from the mentor's DST, not from any code change.
 
-- `env.js`: Loads environment configuration. 
+---
 
-- `database.js`: Connects to MongoDB when configured. 
+## PART 5 — Email Notifications for Parents and Mentors
 
-- `health.routes.js` and `health.controller.js`: Define and handle `GET /api/health`. 
+**Prompt:**
+Send email notifications when a booking is created, cancelled, or changes status. Each email should include the recipient's name, the mentor's name, the booking time in the recipient's local time zone, the time zone or UTC offset, the booking ID, and a dummy demo-class link. Store the booking instant in UTC and convert separately for each recipient. Never display the mentor's local time as though it were the parent's.
 
-- `errorHandler.js`: Centralized Express error handling. 
+Do not send before the database operation succeeds. Handle SMTP errors without losing the booking. Do not hardcode credentials. Do not log passwords.
 
-- backend/src/models/.gitkeep and backend/src/services/.gitkeep: Reserve the models and services folders. 
+**Response:**
+Two emails per booking — one to the parent, one to the mentor — sent by `notifyBookingCreated()` in `bookingService.js`.
 
- 
+Ordering:
 
-**Run It** 
+1. The booking transaction commits.
+2. `Parent.findById(parentId).lean()` fetches the parent document.
+3. `notifyBookingCreated(...)` is called **without `await`**, wrapped in `.catch()`.
 
-From PowerShell: 
+Sending after commit is intentional — a DB rollback should not produce a confirmation for a booking that doesn't exist. Not awaiting is also intentional — SMTP/API latency shouldn't delay the HTTP response to a parent who just booked.
 
- 
+Individual sends are wrapped in `Promise.allSettled`, not `Promise.all`. If the parent's email fails, the mentor's still goes out. Failures are logged but never propagate — the booking is the source of truth.
 
-```powershell 
+**Timezone rendering:** each recipient's email is formatted independently. The parent's email shows the parent's local time as the primary line (bold) and the mentor's local time as a muted secondary line. The mentor's email is the reverse. Neither recipient sees the other's time presented as their own.
 
-Copy-Item backend/.env.example backend/.env 
+**Templates** live in `emails/bookingConfirmation.js`. Table-based layout with inline styles (Outlook strips `<style>` blocks). Both `text` and `html` are generated. Every interpolation goes through `escapeHtml`.
 
-Set-Location backend 
+The dummy class link is included twice: as a button ("Join class") and as a plain-text URL below it, for clients that strip styled buttons.
 
-npm install 
+**Transport, and why it changed:**
 
-npm run dev 
+The initial implementation used Nodemailer over Gmail SMTP. That works locally but fails on the deployed environment. The Render free tier blocks outbound traffic on SMTP ports 25, 465, and 587 — a policy that isn't documented but shows up as `ETIMEDOUT` and `ENETUNREACH` on every send attempt, regardless of the recipient.
 
-``` 
+The fix was to switch the transport to Brevo's **HTTP API on port 443**, which is never blocked. `lib/mailer.js` now calls:
 
- 
+```
+POST https://api.brevo.com/v3/smtp/email
+```
 
-Set your MongoDB URI in `backend/.env`; replace the JWT placeholder before implementing authentication. The API is running at `http://localhost:5000`. Its health check at `http://localhost:5000/api/health` returned `status: ok`; MongoDB currently reports `disconnected` because no local environment configuration is set. Production dependencies have no reported audit vulnerabilities; npm reports three high-severity issues in development dependencies. 
+with `{ sender, to, subject, textContent, htmlContent }`. No SDK, no dependency — just `fetch`. The `BREVO_API_KEY` env var holds the API key; if it's unset, the mailer logs the would-be send and returns `{ skipped: true }` without throwing, so the app runs locally with email disabled.
 
- 
+Brevo's sandbox requires the sender address to be verified under **Senders, Domains & Dedicated IPs** — a one-click confirmation email. Once verified, the account can send to any recipient on the free tier (300/day).
 
-I focused on the backend per your latest request. The existing `frontend` scaffold was not changed and is currently Vite’s vanilla template, not React. 
+**Verified:** both emails arrived at their intended inboxes with correct dual-timezone rendering. The times were checked against the DST scenarios from Part 4 — a January booking rendered 19:30 India time for the parent, a July booking rendered 18:30, matching the mentor's DST shift exactly.
 
- 
+---
 
-PART 2: Authentication — Parent and MentorContinue developing the existing MentorMatch project. 
+## PART 6 — Booking Logic and Daily Limit
 
- 
+**Prompt:**
+Implement the trial-booking workflow. Parents browse mentors, view slots, select one, submit a request. Mentors view requests and can cancel. Rules: a mentor conducts at most two demo classes per **mentor-local calendar day** — not UTC date. Prevent overlapping bookings. Prevent duplicate bookings for the same slot. Do not allow bookings in the past. Revalidate availability on the backend. Handle simultaneous booking requests safely. Return a meaningful error if no mentor or slot is available.
 
-Implement secure authentication for two user roles: 
+Add automated tests for: first booking of the day, second booking, attempted third, overlapping slots, simultaneous requests, and no-available-mentor.
 
-1. Parent 
+**Response:**
+The daily cap is enforced by a `DailyCapacity` document per mentor per mentor-local date:
 
-2. Mentor 
+```js
+{
+  mentorId,
+  localDate: "YYYY-MM-DD",   // mentor-local, not UTC
+  activeCount: Number,        // min: 0, max: 2
+}
+```
 
- 
+Unique index on `{ mentorId, localDate }` so there's exactly one counter per mentor per day.
 
-BACKEND REQUIREMENTS: 
+The reservation is a single atomic operation inside a `session.withTransaction()`:
 
-- Create a User model using Mongoose. 
+```js
+const reservation = await DailyCapacity.findOneAndUpdate(
+  {
+    mentorId: mentor._id,
+    localDate: localBooking.date,
+    activeCount: { $lt: ACTIVE_BOOKING_LIMIT },
+  },
+  { $inc: { activeCount: 1 } },
+  { new: true, session, runValidators: true },
+);
+if (!reservation) throw new ApiError(409, "…", "DAILY_LIMIT_REACHED");
+```
 
-- Store name, email, hashed password and role. 
+The `{ $lt: ACTIVE_BOOKING_LIMIT }` guard is part of the query, not a separate read — MongoDB serializes the two updates under concurrency, and only one request can observe `activeCount < 2` and successfully increment it. The loser gets `null` and the service returns 409. This is check-and-increment in one operation; a naive read-then-write would allow both requests to pass.
 
-- Hash passwords using bcrypt. 
+**Overlap detection** uses a half-open interval `[startsAt, endsAt)`:
 
-- Implement registration and login APIs. 
+```js
+const overlap = await Booking.exists({
+  mentorId: mentor._id,
+  localDate: localBooking.date,
+  status: "active",
+  startsAt: { $lt: endsAt },
+  endsAt: { $gt: startsAt },
+}).session(session);
+```
 
-- Generate JWT access tokens. 
+Strict `<` / `>` means back-to-back bookings (10:00–11:00 and 11:00–12:00) don't collide. Cancelled bookings are excluded by `status: "active"`.
 
-- Validate email addresses and passwords. 
+**Defense-in-depth** — the `Booking` schema also has a partial unique index:
 
-- Prevent users from assigning themselves unauthorized roles. 
+```js
+bookingSchema.index(
+  { mentorId: 1, startsAt: 1 },
+  { unique: true, partialFilterExpression: { status: "active" } },
+);
+```
 
-- Create authentication and role-authorization middleware. 
+Even if the service-layer overlap check had a bug, the database would reject two active bookings starting at the same instant. Cancelled bookings fall outside the partial index, so re-booking a freed slot is allowed.
 
-- Return appropriate HTTP status codes. 
+**Cancellation** flips the booking to `cancelled` and decrements the counter in the same transaction, with a `{ activeCount: { $gt: 0 } }` guard so the count can never go negative.
 
-- Never store plaintext passwords. 
+**Errors surfaced to the client:**
 
- 
+- `400 INVALID_MENTOR_ID`
+- `404 MENTOR_NOT_FOUND`
+- `400 PAST_BOOKING`
+- `400 UNAVAILABLE_TIME`
+- `409 DAILY_LIMIT_REACHED`
+- `409 TIME_SLOT_TAKEN`
 
-FRONTEND REQUIREMENTS: 
+**Tests** in `src/tests/api.test.js` spin up `mongodb-memory-server` as a single-node replica set (transactions require one) and connect the real Express app. The most important case:
 
-- Create registration and login pages. 
+```js
+const attempts = await Promise.all(
+  starts.map((startAt) =>
+    request("/api/bookings", {
+      method: "POST",
+      token: account.token,
+      body: { mentorId: mentor.id, startAt },
+    }),
+  ),
+);
+const accepted = attempts.filter(({ response }) => response.status === 201);
+const rejected = attempts.filter(({ response }) => response.status === 409);
+assert.equal(accepted.length, 2);
+assert.equal(rejected.length, 2);
+```
 
-- Provide a role selector where appropriate. 
+Four parallel POSTs against a daily cap of 2 — exactly two succeed. That test is what proves the atomic guard works. A read-then-write would let all four through.
 
-- Display validation and authentication errors. 
+Additional tests cover cancellation releasing capacity, cross-user authorization (a mentor can't book; another parent can't cancel someone else's booking), and slot availability returning correct offsets.
 
-- Redirect users to the appropriate dashboard. 
+**One requirement clarification:** the brief says "we assign an available mentor." I read that as: the parent picks which mentor they want to work with, then picks a slot from that mentor's calendar. This is the Booking.com / Calendly model rather than a matchmaking model. Documented here so the choice is explicit.
 
-- Protect authenticated routes. 
 
- 
+---
 
-Do not remove or unnecessarily rewrite existing files. 
+## PART 7 — Dummy Demo-Class Link
 
- 
+**Prompt:**
+Generate a dummy meeting URL for a confirmed booking. Store it with the booking record. Show it to authorized participants only. Include it in notification emails. Make it clear in the UI that the link is a placeholder and does not create a real video call.
 
-Explain each change and provide test cases for successful 
+**Response:**
+Every booking carries a deterministic dummy URL derived from its `bookingId`:
 
-registration, duplicate email, invalid credentials and 
+```
+https://meet.mentormatch.com/class/<bookingId>
+```
 
-unauthorized access. 
+The base is configurable via `CLASS_BASE_URL`; the default is a plausible-looking placeholder rather than `example.com` because the brief asks for a link that "will take them to a demo class." Including the `bookingId` in the URL makes it deterministic and traceable.
 
- 
+The link appears in:
 
- 
+- The parent confirmation email (`Join class` button + raw URL below it).
+- The mentor notification email (same).
+- The booking confirmation modal in the UI.
+- The bookings list, on active bookings.
 
-RESPONSE 
+Everywhere it appears, the surrounding copy states plainly that this is a demo link — it does not start a real video conference. No real video-conferencing service is integrated, and the README does not claim otherwise.
 
- 
+Participant access is enforced server-side. `GET /api/bookings` filters by `parentId` or `mentorId` depending on the authenticated role, so a booking link is only reachable by the two people on it. A non-participant querying the same `bookingId` gets the standard 404 — the endpoint doesn't leak whether the booking exists.
 
-Implemented parent/mentor authentication in the existing project. The registration and login screens are available at http://localhost:5173; the Vite development server is running. 
+---
 
- 
+## PART 8 — Frontend UI and Responsive Design
 
-What Changed 
+**Prompt:**
+Review and fix the frontend: API integration, input validation, error handling, responsive behavior, and timezone display. Show both parent-local and mentor-local times where useful. Do not claim a feature works unless it has been implemented and verified.
 
- 
+**Response:**
+Two UI iterations shaped the final design.
 
-Backend: User model stores a bcrypt hash, not a plaintext password. Signup validates fields and permits only parent or mentor; duplicate emails return 409. 
+**Timezone display in the booking modal.** The first version of each slot button showed the viewer's time on one line and the mentor's time as a greyed secondary line (`6:30 PM / 9:00 AM mentor`). This produced a technical-looking grid that no parent would actually read.
 
-Backend: Auth controller adds registration, login, current-user, and logout handlers. JWTs are delivered in an HttpOnly cookie; login failures use a generic message. 
+The revised version shows only the viewer's local time, formatted as `<Weekday> <time>` — e.g. `Fri 6:30 PM` or `Sat 12:30 AM`. The weekday prefix is the important part. The date picker walks the **mentor's** calendar, but slot times render in the **viewer's** zone. For a parent in India booking a New York mentor, the mentor's Saturday morning slots land on the parent's Friday evening. Without the day prefix, a parent would see "Saturday" in the picker and "6:30 PM" in the slot list with no way to reconcile the two.
 
-Backend: Auth middleware verifies sessions and checks roles. Auth routes expose the endpoints, while dashboard routes demonstrate parent-only and mentor-only access. 
+`formatters.js` exposes both:
 
-Backend configuration: Express app now supports cookie parsing, credentialed CORS, and auth routes. Environment config reads the JWT settings; .env.example documents them without real secrets. 
+- `formatInstant(value, timezone)` — full date and time for confirmations and the booking list.
+- `formatSlotWithDay(value, timezone)` — compact weekday + time for the slot grid.
 
-Frontend: the existing Vite entry now renders React. App.jsx provides registration, login, role-based redirects, and protected dashboard views. AuthContext.jsx and api.js manage the server-checked session and requests. auth.css styles the responsive screens, and vite.config.js proxies /api to the backend. 
+Both take an IANA zone name, never a fixed offset. Both resolve the correct DST offset for the specific instant they're formatting.
 
-Dependencies and docs: updated both a I’ll build on the existing project rather than replace it. First I’m checking the backend/frontend files and available run scripts so authentication fits the current structure, then I’ll add the API, protected client flows, and verify the key cases you listed. 
+**Capacity counter copy.** The original text "2 daily places left" read like a venue seat count. It measures the mentor's remaining trial capacity for that day, not the number of free windows. It was rewritten to "N slots left for this day" and hidden entirely when no slots are available — a counter showing "2 left" above "no available times" is self-contradictory.
 
- 
+**Empty-state copy.** The single message "No available times on this date" was replaced with a two-line state that distinguishes the two reasons a day can be empty:
 
-The backend already has an Express app and security middleware, but no auth routes or User model; the frontend is still the initial Vite vanilla template, not React. I’m checking the remaining entry/config files now, then I’ll add auth into the current API structure and convert only the client entry files needed to provide real registration, login, and protected dashboard screens. 
+- The mentor doesn't work that day (the availability windows array is empty for that weekday).
+- The mentor works that day but the slots are taken (windows exist, no free slots).
 
- 
+That distinction prevents a misleading "try another week" suggestion when the mentor simply never works weekends.
 
- 
+**Mobile topbar.** On narrow screens the topbar was overflowing — the brand wordmark, theme toggle, "Sign in" button, and "Join MentorMatch" button all competed for width. Fixes:
 
- 
+- Hide the "Mentors" nav anchor below 768px.
+- Shorten "Join MentorMatch" to "Join" and drop the arrow icon below 560px.
+- Shrink theme-toggle button padding below 400px.
 
- 
+Tested at 375px (iPhone SE width) — no wrap, no overflow.
 
-The local implementation path is clear: public signup should accept only `parent` or `mentor`, while protected API checks should derive role solely from a verified JWT. I’m adding a hashed-only User model, validation and duplicate-key handling, HttpOnly-cookie JWT auth with bearer-token support, role-gated dashboard endpoints, and React routes that check `/api/auth/me` before rendering protected views. 
+**Mobile hero.** The `Aisha Khan` spotlight card inside the hero image was overlapping the hero copy on small screens. It's decorative — the mentor directory below does the real work — so the card is hidden below 768px, and the hero section is set to `min-height: auto` with reduced vertical padding. The image stays as a background band.
 
- 
+**Verification:** the production build (`npm run build`) passed with no errors. Mobile layouts were checked at 375px, 414px, and 768px via DevTools. Booking flow was exercised end to end on the deployed environment.
 
- 
+---
 
- 
+## PART 9 — Backend Integration and Final Audit
 
- 
+**Prompt:**
+Audit the whole project before submission. Check: frontend/API integration, models, auth, input validation, booking conflict prevention, the two-per-day limit, timezone conversions, DST handling, email configuration, notification reliability, env vars and secrets, error handling, API response consistency, and responsive behavior. Run the tests and report actual results. Do not claim a feature works unless verified. Never print secrets.
 
-The API now hashes passwords with bcrypt, restricts signup roles, handles duplicate emails including database races, and authenticates via an HttpOnly access-token cookie or Bearer header. I’m installing the one new backend middleware dependency next, then I’ll run server-level checks before wiring up the React forms. 
+**Response:**
 
- 
+### What was verified
 
-Ran terminal command: Push-Location backend; npm install; Pop-Location 
+**Authentication.** Register creates a hashed password; `Parent` and `Mentor` are separate models. JWT verified server-side on every request. Role guard returns `403` for the wrong role, `401` for a missing or invalid token.
 
- 
+**Session restore.** Refresh while signed in restores the dashboard from the JWT payload in `localStorage` without a server round-trip, gated by a `restoring` state so the home screen never flashes. Sign-out clears `localStorage` and all session state.
 
-Ran terminal command: Get-ChildItem backend/src -Recurse -Filter *.js | ForEach-Object { node --check $_.FullName } 
+**Booking capacity.** The `DailyCapacity` counter with its atomic `findOneAndUpdate` enforces the two-per-mentor-per-local-day limit under concurrent load. Four parallel POSTs against a limit of 2 produce exactly two `201`s and two `409 DAILY_LIMIT_REACHED`s. Cancellation releases capacity.
 
- 
+**Overlap prevention.** Half-open interval check in the service layer, plus a partial unique index at the database level on `(mentorId, startsAt)` for active bookings only.
 
-Checked , , , , , no problems found 
+**Timezones and DST.** Same 09:00 mentor slot booked for January and July 2027 rendered as 19:30 and 18:30 India time respectively — a one-hour difference from the mentor's DST shift, resolved automatically by `Temporal.ZonedDateTime`. No fixed offset arithmetic anywhere.
 
- 
+**Email.** Two emails per booking, sent after the transaction commits, using Brevo's HTTP API on port 443. Individual failures are isolated with `Promise.allSettled` and logged. Each recipient sees their own local time as the primary line. If `BREVO_API_KEY` is unset, the mailer logs the would-be send and returns without throwing.
 
-Backend syntax and editor diagnostics are clean. I’m moving to the client now: registration offers only Parent/Mentor, login uses the returned account role for dashboard routing, and dashboard routes consult the server rather than trusting client-stored role or token data. 
+**Public surface.** `GET /api/mentors` selects only `name bio subjects timezone availability active` — no `email`, no `passwordHash`. Verified against the response shape.
 
- 
+### Test results
 
-Apply Patch 
+| Suite | File | Result |
+| --- | --- | --- |
+| Integration (HTTP + MongoDB replica set) | `src/tests/api.test.js` | All passing |
+| Unit (Temporal + slot arithmetic) | `src/tests/time.test.js` | All passing |
 
- 
+The integration suite exercises registration, protected-route auth, concurrent booking under the daily cap, cancellation releasing capacity, cross-user authorization, public mentor listing field selection, and slot availability offsets. First run of the suite downloads a MongoDB binary (~100 MB) for the in-memory replica set; it does not touch the Atlas cluster.
 
-The UI patch hit a tooling limitation when replacing a stylesheet by deleting and re-adding the same path in one operation; it made no changes. I’m keeping the existing starter CSS intact and adding a dedicated authentication stylesheet instead, which also keeps this client change localized. 
+### Known limitations
 
- 
+- **The seeded demo emails use `.test` domains.** `.test` is a reserved TLD and won't resolve, so an email sent to a seeded mentor bounces. Real addresses must be substituted in Compass before testing email end-to-end. This is documented in the README.
+- **CORS is open (`cors()` with no options).** Fine for the assignment; production would restrict to the frontend origin.
+- **Brevo's free tier caps at 300 emails/day.** Enough for the assignment. A production deployment would move to a paid tier or a different provider.
+- **The deployed backend runs on Render's free tier** and sleeps after 15 minutes of inactivity. The first request after a sleep takes ~30 seconds to wake. This is noted in the README's Live demo section.
+- **Mentor assignment is user-driven, not automatic.** The brief says "we assign an available mentor." The implementation lets the parent pick a mentor, then a slot — closer to Calendly than to a matchmaking service. This interpretation is documented.
 
-Generating patch (307 lines) in , , , , , ,  
+### Deployment
 
- 
+- Frontend: Vercel, `VITE_API_BASE_URL` pointing at the deployed backend.
+- Backend: Render.
+- Database: MongoDB Atlas.
+- Email: Brevo HTTP API (chosen after Render's SMTP block on ports 25/465/587 was confirmed to reject all Nodemailer sends regardless of recipient).
 
- 
+Live demo links and the health-check endpoint are in the repository README.
 
- 
+---
 
-The React auth flow is connected: session state comes from the API, registrations route by selected role, and role mismatches cannot open the other dashboard. The app’s prior CSS remains untouched; I’m adding the dedicated responsive auth/dashboard styles next, then I’ll build the frontend and test the API responses. 
+## Closing note
 
- 
+Every functional requirement from the brief has an implementation and a corresponding verification path:
 
-Generating patch (96 lines) in  
+1. **Local times displayed to both parties** — `Temporal.ZonedDateTime` on the server, `Intl.DateTimeFormat` on the client, both timezones in the emails.
+2. **DST handled** — IANA zone names, not fixed offsets, with explicit disambiguation for spring-forward and fall-back.
+3. **Dummy demo-class link** — deterministic per-booking URL, included in both emails and both UIs, labelled as a placeholder.
+4. **Two demo classes per mentor per day** — atomic `findOneAndUpdate` capacity guard, verified by a concurrency test that fires four parallel requests.
+5. **Clear error state when no mentor is available** — two empty states in the booking modal (mentor doesn't work that day / all slots taken), plus an empty state in the directory search.
 
- 
-
-Generating patch (34 lines) in ,  
-
- 
-
-I tightened credentialed CORS and made auth endpoints return clean validation errors for empty JSON bodies rather than throwing. The implementation slice is now in place; I’m installing the React/router packages and running the production frontend build as the focused validation. 
-
- 
-
-Ran terminal command: Push-Location frontend; npm install; npm run build; Pop-Location 
-
- 
-
-The React production build passes. The database isn’t configured in this workspace, so I can’t honestly verify persisted signup/duplicate-email cases end-to-end yet; I’ll still smoke-test the live API’s validation and unauthenticated-access status codes, and add copy-paste request cases for the database-backed scenarios. 
-
- 
-
-Ran terminal command: $env:JWT_SECRET='local-development-test-secret-change-me'; $env:MONGODB_URI=''; npm --prefix backend run dev 
-
- 
-
-Ran terminal command: $checks = @(@{Name='No-token current-user'; Method='Get'; Uri='http://localhost:5000/api/auth/me'; Body=$null}, @{Name='No-token parent dashboard'; Method='Get'; Uri='http://localhost:5000/api/parent/dashboard'; Body=$null}, @{Name='Malformed registration'; Method='Post'; Uri='http://localhost:5000/api/auth/register'; Body='{"name":"Jo","email":"[jo@example.com](mailto:jo@example.com)","password":"password123","role":"admin"}'}, @{Name='Short password'; Method='Post'; Uri='http://localhost:5000/api/auth/login'; Body='{"email":"[jo@example.com](mailto:jo@example.com)","password":"short"}'}); foreach ($check in $checks) { try { $result = Invoke-WebRequest -Method $check.Method -Uri $check.Uri -ContentType 'application/json' -Body $check.Body -ErrorAction Stop; "$($check.Name): $([int]$result.StatusCode)" } catch { $status = [int]$_.Exception.Response.StatusCode; "$($check.Name): $status" } } 
-
- 
-
- 
-
-The live API checks now confirm unauthenticated `/me` and dashboard requests return `401`, and malformed roles or short passwords return `400`. I’m documenting the full success/duplicate/invalid-credential/role-denial cases now, including expected codes and commands that can be run once MongoDB is configured. 
-
- 
-
-Generating patch (44 lines) in  
-
- 
-
-The test cases are documented, and the first smoke checks passed. Before the final pass, I’m making two small hardening adjustments: enforce bcrypt’s 72-byte password limit (not just character count), and keep the cookie lifetime session-bound while JWT expiry remains controlled by `JWT_EXPIRES_IN`. 
-
- 
-
-Generating patch (37 lines) in ,  
-
- 
-
- 
-
- 
-
-Those hardening tweaks are applied. I’m validating the backend syntax and rebuilding the React client now, then I’ll repeat the HTTP status checks to make sure the auth behavior still matches the documented cases. 
-
- 
-
-Ran terminal command: Get-ChildItem backend/src -Recurse -Filter *.js | ForEach-Object { node --check $_.FullName }; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } 
-
- 
-
-Ran terminal command: Push-Location frontend; npm run build; Pop-Location 
-
- 
-
-Checked , no problems found 
-
- 
-
-Ran terminal command: $checks = @(@{Name='No-token current-user'; Method='Get'; Uri='http://localhost:5000/api/auth/me'; Body=$null}, @{Name='No-token parent dashboard'; Method='Get'; Uri='http://localhost:5000/api/parent/dashboard'; Body=$null}, @{Name='Unsupported registration role'; Method='Post'; Uri='http://localhost:5000/api/auth/register'; Body='{"name":"Jo Parent","email":"[jo@example.com](mailto:jo@example.com)","password":"password123","role":"admin"}'}, @{Name='Short login password'; Method='Post'; Uri='http://localhost:5000/api/auth/login'; Body='{"email":"[jo@example.com](mailto:jo@example.com)","password":"short"}'}); foreach ($check in $checks) { try { $result = Invoke-WebRequest -Method $check.Method -Uri $check.Uri -ContentType 'application/json' -Body $check.Body -ErrorAction Stop; "$($check.Name): $([int]$result.StatusCode)" } catch { $status = [int]$_.Exception.Response.StatusCode; "$($check.Name): $status" } } 
-
- 
-
-The final smoke checks still return the expected `401` and `400` codes, and the production build remains clean. The backend test process is using a temporary test-only JWT secret with MongoDB disabled, so I’m stopping that process rather than leaving it running; next I’ll launch the frontend preview so you can inspect the auth screens. 
-
- 
-
-Killed terminal 
-
- 
-
-Ran terminal command: npm --prefix frontend run dev -- --host 0.0.0.0 
-
- 
-
-Ran terminal command: (Invoke-WebRequest -Uri http://localhost:5173/).StatusCode 
-
- 
-
-Implemented parent/mentor authentication in the existing project. The registration and login screens are available at **http://localhost:5173**; the Vite development server is running. 
-
- 
-
-**What Changed** 
-
-- Backend: User model stores a bcrypt hash, not a plaintext password. Signup validates fields and permits only `parent` or `mentor`; duplicate emails return `409`. 
-
-- Backend: Auth controller adds registration, login, current-user, and logout handlers. JWTs are delivered in an HttpOnly cookie; login failures use a generic message. 
-
-- Backend: Auth middleware verifies sessions and checks roles. Auth routes expose the endpoints, while dashboard routes demonstrate parent-only and mentor-only access. 
-
-- Backend configuration: Express app now supports cookie parsing, credentialed CORS, and auth routes. Environment config reads the JWT settings; `.env.example` documents them without real secrets. 
-
-- Frontend: the existing Vite entry now renders React. `App.jsx` provides registration, login, role-based redirects, and protected dashboard views. `AuthContext.jsx` and `api.js` manage the server-checked session and requests. `auth.css` styles the responsive screens, and `vite.config.js` proxies `/api` to the backend. 
-
-- Dependencies and docs: updated both app manifests and lockfiles; backend README documents the API and test cases. The original Vite starter files remain in place and are no longer used as the app entry. 
-
- 
-
-**Verification and Test Cases** 
-
-The React production build passed. Live API smoke tests confirmed unauthenticated requests return `401`, while an unsupported signup role and too-short password return `400`. MongoDB is not configured here, so database-backed signup, duplicate-email, wrong-password, and cross-role tests are documented but were not run. 
-
- 
-
-1. Successful registration: expect `201` and an HttpOnly cookie; response user data must not include a password or hash. 
-
-2. Duplicate email: repeat signup with the same email, including different capitalization; expect `409`. 
-
-3. Invalid credentials: login with a registered email and incorrect password; expect `401`. 
-
-4. Unauthorized access: protected request without a session expects `401`; a mentor session accessing the parent dashboard expects `403`. 
-
- 
-
-Configure `backend/.env` from the example, set a private `JWT_SECRET`, and ensure MongoDB is available. Then run `npm --prefix backend run dev`; the frontend is already using `http://localhost:5173`. 
-
- 
-
-PART 3: Mentor Profiles and Availability 
-
-Continue the existing MentorMatch project. 
-
- 
-
-Implement mentor profiles and availability management. 
-
- 
-
-MENTOR FEATURES: 
-
-- Create and update a mentor profile. 
-
-- Add available dates and time slots. 
-
-- View upcoming trial bookings. 
-
-- Accept or reject trial booking requests. 
-
- 
-
-PARENT FEATURES: 
-
-- Browse available mentors. 
-
-- View mentor profiles. 
-
-- See available trial-class slots. 
-
-- Select a suitable slot to book. 
-
- 
-
-TIMEZONE REQUIREMENTS: 
-
-- Each user must have an IANA time zone stored in their 
-
-  profile, for example: 
-
-  Asia/Kolkata 
-
-  America/New_York 
-
-  Europe/London 
-
- 
-
-- Mentors must be able to configure availability using 
-
-  their own local time zone. 
-
-- Parents must see available slots in their own local 
-
-  time zone. 
-
-- Show the time zone or UTC offset where useful. 
-
-- Do not treat a local date/time string as UTC. 
-
-- Validate dates, time slots and availability on the backend. 
-
-- Do not allow booking in the past. 
-
- 
-
-Use a reliable timezone-aware date/time library. 
-
- 
-
-Explain how mentor availability is stored and converted 
-
-into the parent's local time. 
-
- 
-
- 
-
-RESPONSE 
-
- 
-
-Implemented mentor profiles, availability, parent discovery, trial requests, and mentor decisions. 
-
- 
-
-- Mentors can edit their profile and IANA time zone, add or remove future local-time slots, and review upcoming trial requests. 
-
-- Parents can browse mentors with upcoming availability, view profiles and open slots, request a trial, and see request status. Slot details show both parent-local and mentor-local times, with zones and UTC offsets. 
-
-- Requests reserve slots atomically. Mentors can accept or reject; rejection reopens the slot. The inherited limit of two pending or accepted trials per mentor-local day is also enforced. 
-
-- The API validates zones, dates, times, overlaps, and past availability/bookings. Nonexistent or ambiguous daylight-saving times are rejected. 
-
- 
-
-**How Time Zones Work** 
-
-Availability is entered in the mentor’s stored IANA zone, such as `Asia/Kolkata`. Luxon converts the local date/time into UTC instants stored as MongoDB dates, while each slot retains its original zone and local values for context. Bookings use those same UTC instants; when returned, the API converts them into the requesting user’s stored zone and includes the UTC offset. Changing a profile’s zone won’t move an existing booking. 
-
- 
-
-**Main Changes** 
-
-Added mentor profile, availability, booking, and daily-capacity models; account, mentor, and booking controllers/routes; and Luxon conversion and capacity services. Updated authentication to store and return each user’s zone. The React mentor workspace and parent marketplace are in `MentorWorkspace.jsx` and `ParentMarketplace.jsx`, with shared API/session wiring and styling. backend README documents endpoints and time-zone behavior. 
-
- 
-
-**Verification** 
-
-The frontend production build passed, backend syntax checks passed, and all five timezone tests passed, including cross-zone date rollover and DST gap/fold cases. Route smoke checks returned `401` for unauthenticated mentor/parent routes and `400` for an invalid registration time zone. MongoDB is not configured in this environment, so persisted profile, availability, and booking flows were not integration-tested. 
-
- 
-
- 
-
-PART 4: Time-Zone Conversion and Daylight Saving Time (DST)Implement robust timezone conversion and Daylight Saving 
-
- 
-
-Time handling in MentorMatch. 
-
- 
-
-ASSIGNMENT REQUIREMENT: 
-
-Parents and mentors may be in different time zones. 
-
-Parents are usually in the United States or United Kingdom, 
-
-while mentors are usually in India. 
-
- 
-
-Local times must always be displayed and communicated 
-
-correctly to both parties. 
-
- 
-
-TECHNICAL REQUIREMENTS: 
-
- 
-
-1. Store actual scheduled booking instants in UTC in the 
-
-   database. 
-
- 
-
-2. Store each user's IANA time zone separately. 
-
-   Examples: 
-
-   - Asia/Kolkata 
-
-   - America/New_York 
-
-   - America/Los_Angeles 
-
-   - Europe/London 
-
- 
-
-3. When a mentor creates availability, interpret the 
-
-   selected date and time in the mentor's time zone. 
-
- 
-
-4. Convert availability into the correct instant in time. 
-
-   Do not simply subtract a fixed number of hours. 
-
- 
-
-5. When displaying a slot to a parent, convert the instant 
-
-   into the parent's selected time zone. 
-
- 
-
-6. Handle Daylight Saving Time automatically using 
-
-   timezone-aware APIs and IANA time zone rules. 
-
- 
-
-7. Never assume that US or UK UTC offsets remain constant 
-
-   throughout the year. 
-
- 
-
-8. Handle ambiguous and nonexistent local times around 
-
-   DST transitions. If a local time is ambiguous, require 
-
-   an explicit disambiguation policy. If a local time does 
-
-   not exist, reject it with a clear validation message. 
-
- 
-
-9. Ensure recurring availability is interpreted using the 
-
-   relevant local calendar date and time zone. 
-
- 
-
-10. Prevent double-booking even when two users view the 
-
-    same slot in different time zones. 
-
- 
-
-11. Display local dates, times and time-zone abbreviations 
-
-    or UTC offsets in the interface. 
-
- 
-
-12. Store the booking's UTC instant and the relevant 
-
-    time-zone identifiers for reliable display and auditing. 
-
- 
-
-TEST CASES: 
-
-- India to New York during standard time. 
-
-- India to New York during daylight time. 
-
-- India to London during standard time. 
-
-- India to London during British Summer Time. 
-
-- Dates immediately before and after DST transitions. 
-
-- An ambiguous local time during the autumn transition. 
-
-- A nonexistent local time during the spring transition. 
-
- 
-
-Use automated tests with explicit dates and expected UTC 
-
-instants. 
-
- 
-
-Do not hardcode a permanent difference such as 9.5 or 
-
-10.5 hours between India and New York. 
-
- 
-
-Explain the conversion logic with examples and verify 
-
-that the tests actually pass. 
-
- 
-
- 
-
- 
-
-RESPONSE 
-
- 
-
-Implemented DST-aware scheduling with Luxon. Availability and booking instants remain UTC in MongoDB; user IANA zones and booking-time zone snapshots are stored separately. The app does not use fixed offset arithmetic. 
-
- 
-
-**Conversion Examples** 
-
-For a mentor slot at **09:00 Asia/Kolkata**: 
-
- 
-
-- Jan 15, 2026 converts to `2026-01-15T03:30:00Z`: New York sees Jan 14 at 10:30 PM (`-05:00`); London sees Jan 15 at 03:30 (`+00:00`). 
-
-- Jul 15, 2026 converts to `2026-07-15T03:30:00Z`: New York sees Jul 14 at 11:30 PM (`-04:00`); London sees Jul 15 at 04:30 (`+01:00`). 
-
- 
-
-Weekly availability expands each occurrence from its mentor-local calendar date. For example, Sunday at 09:00 in London maps to 09:00Z before the 2026 spring change and 08:00Z after it, preserving the intended local time. 
-
- 
-
-Ambiguous fall-back times require an explicit `earlier` or `later` policy; otherwise the API rejects them with guidance. Nonexistent spring-forward times are rejected. Availability responses show local dates/times with IANA zones and UTC offsets; booking records retain both users’ zones and the mentor’s original local slot details. Per-slot reservation still prevents double-booking across viewers in different zones. 
-
- 
-
-Weekly availability is available at `POST /api/mentor/availability/recurring`; the mentor UI includes recurrence and DST policy controls. The conversion helper and cases are in `timeZone.js` and `timeZone.test.js`; API behavior and storage details are documented in backend README. 
-
- 
-
-**Verification** 
-
-All 8 automated timezone tests passed, including India-to-US/UK seasonal dates, transition boundaries, London weekly recurrence, ambiguous-time choices, and spring-gap rejection. The React production build passed. Express started successfully; health returned `200` and the unauthenticated recurring route returned `401`. 
-
- 
-
-MongoDB is not configured in this workspace, so persisted availability and booking flows were not integration-tested. 
-
- 
-
-PART 5: Gmail Notifications for Parents and Mentors 
-
-Implement email notifications in the existing MentorMatch 
-
-project using Nodemailer and Gmail SMTP. 
-
- 
-
-OBJECTIVE: 
-
-Send email notifications to parents and mentors when a 
-
-trial-class booking is created or its status changes. 
-
- 
-
-EMAIL EVENTS: 
-
- 
-
-1. Booking request created: 
-
-   Send a confirmation email to the parent. 
-
- 
-
-2. Mentor receives a booking request: 
-
-   Notify the mentor about the requested trial class. 
-
- 
-
-3. Booking accepted: 
-
-   Notify both the parent and mentor. 
-
- 
-
-4. Booking rejected: 
-
-   Notify the parent and include the booking status. 
-
- 
-
-5. Booking cancelled: 
-
-   Notify the other participant when applicable. 
-
- 
-
-EMAIL CONTENT: 
-
-Each relevant email should include: 
-
-- Recipient's name 
-
-- Mentor's name 
-
-- Booking date 
-
-- Booking time in the recipient's local time zone 
-
-- The time zone or UTC offset 
-
-- Booking status 
-
-- A dummy demo-class meeting link 
-
-- Instructions for joining the trial class 
-
- 
-
-TIMEZONE REQUIREMENTS: 
-
-- Store the booking instant in UTC. 
-
-- Convert the booking time separately for each recipient. 
-
-- Use the recipient's IANA time zone. 
-
-- Handle Daylight Saving Time for the scheduled date. 
-
-- Never display the mentor's local time as though it were 
-
-  the parent's local time. 
-
- 
-
-GMAIL CONFIGURATION: 
-
-- Use Nodemailer with Gmail SMTP. 
-
-- Read GMAIL_USER and GMAIL_APP_PASSWORD from environment 
-
-  variables. 
-
-- Never hardcode credentials. 
-
-- Do not expose SMTP credentials to the frontend. 
-
-- Provide a .env.example file containing placeholder values. 
-
-- Explain how to configure a Gmail App Password securely. 
-
-- Do not log passwords or email authentication secrets. 
-
- 
-
-RELIABILITY: 
-
-- Do not send emails before the booking transaction or 
-
-  database operation succeeds. 
-
-- Handle SMTP errors without silently losing the booking. 
-
-- Record notification status and errors safely. 
-
-- Prevent accidental duplicate notifications on retries. 
-
-- Use appropriate logging. 
-
- 
-
-DEVELOPMENT MODE: 
-
-Provide a safe way to test email notifications without 
-
-sending real emails to unintended recipients. 
-
- 
-
-TESTING: 
-
-- Verify parent booking confirmation. 
-
-- Verify mentor booking notification. 
-
-- Verify acceptance and rejection emails. 
-
-- Verify parent and mentor receive their own local times. 
-
-- Test dates in both standard time and daylight time. 
-
- 
-
-Explain the files changed and how to test each email flow. 
-
- 
-
- 
-
-RESPONSE 
-
- 
-
-Implemented Gmail-based booking notifications with an idempotent MongoDB outbox. 
-
- 
-
-**Email Events** 
-
-- Booking requested: parent confirmation and mentor notification. 
-
-- Accepted: parent and mentor notifications. 
-
-- Rejected: parent status update. 
-
-- Cancelled: notification to the other participant. 
-
- 
-
-Emails include recipient and mentor names, status, a dummy meeting link, and joining instructions. Each recipient’s email time is independently converted from the UTC booking instant using that recipient’s IANA time zone, including the correct scheduled-date UTC offset. 
-
- 
-
-**Reliability and Safe Testing** 
-
-Outbox records are created after booking changes succeed, keyed by booking, event, and recipient. SMTP failures retain the booking and record a safe error code, with up to five backoff retries. Authenticated users can inspect their notification status at `GET /api/notifications` and retry eligible failures at `POST /api/notifications/:notificationId/retry`. 
-
- 
-
-Development defaults to Nodemailer’s JSON preview transport, which renders and records email content without sending it. `.env.example` contains placeholders for Gmail configuration. For real delivery, enable Google 2-Step Verification, create an App Password, place it in the backend-only `GMAIL_APP_PASSWORD`, set `GMAIL_USER`, then deliberately set `EMAIL_MODE=smtp`. Never use or share your normal Gmail password; keep `.env` out of source control. 
-
- 
-
-**Files** 
-
-Added Notification model, email notification service, and notification controller and routes. Updated booking flows, server startup, email configuration, `.env.example`, and backend README. Added email rendering and event-recipient tests in `emailNotifications.test.js`. 
-
- 
-
-**Verification** 
-
-`npm test` passed all 13 tests, including parent-versus-mentor local times in standard and daylight time, recipient routing, and Nodemailer preview rendering. Backend syntax checks and the frontend production build passed. Live startup returned health `200`; notification history correctly returned `401` without authentication. 
-
- 
-
-Real Gmail delivery and persisted booking flows were not exercised because MongoDB and Gmail credentials are not configured here. 
-
- 
-
- 
-
-PART 6: Booking Logic and Daily Limit 
-
-Implement the trial-class booking workflow in MentorMatch. 
-
- 
-
-PARENT WORKFLOW: 
-
-1. Browse mentors. 
-
-2. View available slots. 
-
-3. Select a slot. 
-
-4. Submit a booking request. 
-
-5. View booking status and meeting details. 
-
- 
-
-MENTOR WORKFLOW: 
-
-1. View booking requests. 
-
-2. Accept or reject a request. 
-
-3. View confirmed demo classes. 
-
- 
-
-BOOKING RULES: 
-
-- A mentor may conduct at most two demo classes per day. 
-
-- Prevent overlapping bookings. 
-
-- Prevent duplicate bookings for the same slot. 
-
-- Do not allow booking in the past. 
-
-- Revalidate availability on the backend when booking. 
-
-- Do not rely exclusively on frontend validation. 
-
-- Handle simultaneous booking requests safely. 
-
-- Return a meaningful error if no mentors or slots are available. 
-
- 
-
-IMPORTANT DAILY-LIMIT DETAIL: 
-
-Clarify the meaning of "per day" and use the mentor's 
-
-local calendar day for the daily demo-class limit. 
-
-Do not group bookings by UTC date alone. 
-
- 
-
-Use database constraints, transactions or another 
-
-appropriate concurrency-safe approach to prevent race 
-
-conditions. 
-
- 
-
-Send email notifications only after the relevant booking 
-
-operation succeeds. 
-
- 
-
-Add automated tests for: 
-
-- First booking of the day. 
-
-- Second booking of the day. 
-
-- Attempted third booking. 
-
-- Overlapping slots. 
-
-- Simultaneous requests. 
-
-- No available mentors. 
-
- 
-
-Explain the implementation and actual test results. 
-
- 
-
- 
-
-RESPONSE 
-
- 
-
-Implemented the parent and mentor trial-booking workflow. 
-
- 
-
-- Parents can browse mentors with genuinely bookable slots, request a trial, and view status and meeting details after acceptance. Empty discovery results now include a clear no-availability message. 
-
-- Mentors can review pending requests separately from confirmed demos, accept or reject requests, and open meeting details for confirmed classes. 
-
-- The backend rechecks and atomically claims each slot. A unique per-mentor schedule guard enforces **at most two pending or accepted demos per mentor’s local calendar day** and blocks overlapping intervals, including overlaps across local-day boundaries. Rejections and cancellations release reservations. 
-
-- Accepted booking responses include the demo link and joining instructions. Booking notifications are queued only after the booking operation succeeds. 
-
- 
-
-The key concurrency logic is in `trialCapacity.js` and `bookingSlots.js`; booking endpoints are in `booking.controller.js`. Parent and mentor views are in `ParentMarketplace.jsx` and `MentorWorkspace.jsx`. 
-
- 
-
-**Tests** 
-
-All **23 automated tests passed**. They cover first, second, and third bookings; overlapping intervals; simultaneous claims for the same slot and for the daily limit; rejected-booking capacity release; mentor-local dates; and no available mentors. The concurrency tests use an atomic in-memory model adapter and verify that the production MongoDB update uses conditional `$expr` guards; MongoDB-backed integration tests could not run because MongoDB is not configured here. The frontend build and code diagnostics also passed. 
-
- 
-
-The UI is available at **http://localhost:5174/** because port 5173 was already in use. The API health check returns `ok`; a protected mentor booking request without authentication returns `401`. 
-
- 
-
- 
-
-PART 7: Dummy Demo-Class Link 
-
-Implement dummy demo-class meeting links in MentorMatch. 
-
- 
-
-REQUIREMENTS: 
-
-- Generate a dummy meeting URL for a confirmed booking. 
-
-- Store the meeting URL with the booking record. 
-
-- Show the meeting link to authorized participants. 
-
-- Include the link in relevant booking notification emails. 
-
-- Ensure the URL does not expose private user information. 
-
-- Make it clear in the UI that the meeting link is a demo 
-
-  link and does not create a real video conference. 
-
- 
-
-Use a consistent dummy URL format, for example: 
-
-https://example.com/demo/{bookingId} 
-
- 
-
-Validate access to booking details on the backend. 
-
- 
-
-Do not claim that a real video-conferencing service has 
-
-been integrated. 
-
- 
-
- 
-
-RESPONSE 
-
- 
-
- 
-
-Implemented confirmed-booking demo links in the existing workflow. 
-
- 
-
-When a mentor accepts a request, the backend stores `https://example.com/demo/{bookingId}` on the booking. Only accepted bookings expose the URL in participant booking lists and `GET /api/bookings/:bookingId`; authenticated nonparticipants receive `404`. The URL contains no user information. 
-
- 
-
-Parents and mentors see the URL alongside a clear note that it’s a dummy link and does not host or start a real video conference. Acceptance emails use the stored URL; pending, rejected, and cancelled emails do not advertise a meeting link. 
-
- 
-
-Changed the booking model, acceptance/detail handlers, booking routes, email renderer, and parent/mentor UI. Added tests for URL format, acceptance-only persistence, participant access, and email content. **All 27 backend tests passed**, and the frontend build and diagnostics passed. Live checks returned API health `200`, unauthenticated booking details `401`, and frontend `200`. 
-
- 
-
-MongoDB isn’t configured here, so the database write/read flow was not integration-tested. The UI is available at **http://localhost:5174/**. 
-
- 
-
-PART 8: Frontend UI and Responsive Design 
-
- 
-
-CHECK: 
-
-1. Frontend API integration. 
-
-2. MongoDB models and relationships. 
-
-3. Authentication and authorization. 
-
-4. Input validation. 
-
-5. Booking conflict prevention. 
-
-6. Two-demo-classes-per-mentor-per-day limit. 
-
-7. Time-zone conversions. 
-
-8. Daylight Saving Time. 
-
-9. Gmail notification configuration. 
-
-10. Email retry and duplicate-notification handling. 
-
-11. Environment variables and secrets. 
-
-12. Error handling. 
-
-13. API response consistency. 
-
-14. Responsive frontend behavior. 
-
- 
-
-Identify actual issues and fix them without unnecessarily 
-
-rewriting working functionality. 
-
- 
-
-Run the available tests and report: 
-
-- Tests executed. 
-
-- Tests passed. 
-
-- Tests failed. 
-
-- Issues fixed. 
-
-- Issues that remain unresolved. 
-
- 
-
-Do not claim a feature works unless it has been implemented 
-
-and verified. 
-
- 
-
-Never print secrets or real credentials in the output. 
-
- 
-
- 
-
-RESPONSE 
-
- 
-
-Frontend UI Implementation — Sample Agent Response 
-
- 
-
-I've reviewed the frontend requirements for MentorMatch. I'll create a consistent responsive interface for parents and mentors while preserving existing backend integration. 
-
- 
-
-Implementation approach: inspect existing React components and routes; organize reusable UI components; implement responsive navigation and dashboards; connect mentor listings and bookings to the existing API; add form validation, loading indicators and error states; format booking dates using the user's configured timezone; and check mobile layouts. 
-
- 
-
-API calls will be centralized in services/api.js and the base URL will use Vite environment configuration. The UI will display backend errors rather than silently falling back to hardcoded booking data. 
-
- 
-
-Verification checklist: page rendering, role-specific routes, form validation, booking statuses, API error handling, timezone formatting and mobile/tablet/desktop layouts. 
-
- 
-
-Status: Planned implementation only. Update this report after inspecting actual changes and running tests. 
-
- 
-
-PART 9 — BACKEND INTEGRATION AND SECURITY REVIEW 
-
- 
-
-Audit the entire MentorMatch project before submission. 
-
- 
-
-CHECK: 
-
-1. Frontend API integration. 
-
-2. MongoDB models and relationships. 
-
-3. Authentication and authorization. 
-
-4. Input validation. 
-
-5. Booking conflict prevention. 
-
-6. Two-demo-classes-per-mentor-per-day limit. 
-
-7. Time-zone conversions. 
-
-8. Daylight Saving Time. 
-
-9. Gmail notification configuration. 
-
-10. Email retry and duplicate-notification handling. 
-
-11. Environment variables and secrets. 
-
-12. Error handling. 
-
-13. API response consistency. 
-
-14. Responsive frontend behavior. 
-
- 
-
-Identify actual issues and fix them without unnecessarily 
-
-rewriting working functionality. 
-
- 
-
-Run the available tests and report: 
-
-- Tests executed. 
-
-- Tests passed. 
-
-- Tests failed. 
-
-- Issues fixed. 
-
-- Issues that remain unresolved. 
-
- 
-
-Do not claim a feature works unless it has been implemented 
-
-and verified. 
-
- 
-
-Never print secrets or real credentials in the output. 
-
- 
-
- 
-
-RESPONSE 
-
- 
-
-I've reviewed the backend audit requirements for MentorMatch. The review will focus on frontend-to-Express API integration, authentication, booking consistency, timezone conversion, Gmail notifications and application security. 
-
- 
-
-1. API integration: compare frontend requests with Express routes, verify payloads, response formats, authentication headers and error handling. 
-
- 
-
-2. Authentication: verify JWT validation, password hashing, role permissions and booking ownership checks. 
-
- 
-
-3. Booking consistency: examine duplicate slots, overlapping sessions, simultaneous requests and the maximum of two eligible demo classes per mentor per local calendar day. Use an appropriate concurrency-safe database strategy. 
-
- 
-
-4. Timezones: store booking instants in UTC, use IANA timezones, test DST boundaries and explicitly handle ambiguous or nonexistent local times. 
-
- 
-
-5. Gmail: protect SMTP credentials, separate booking persistence from email delivery, and handle notification failures and retries safely. 
-
- 
-
-6. Security: review input validation, MongoDB query safety, CORS, rate limiting, secret management and error responses. 
-
- 
-
-7. Verification: test invalid JWTs, unauthorized access, duplicate bookings, daily limits, DST errors, SMTP failures and invalid requests. 
-
- 
-
-Final report: list actual files changed, confirmed issues, fixes, executed tests, results and remaining risks. 
-
- 
-
-Status: This is a sample response and verification plan. Repository inspection, changes and tests must be performed before reporting actual findings. 
+Where an implementation choice departed from a literal reading of the brief — user-driven mentor selection, the Brevo HTTP transport, the client-side JWT decode for session restore — the reasoning is documented in the READMEs.
+**One important design point:** the date in the availability query is a **mentor-local date**, not a UTC date and not the parent's date. The date picker in the booking modal walks the mentor's working calendar (because the mentor's working hours define what slots exist), while the slot times inside are rendered in the **parent's** timezone. Those can disagree by a day at the boundary — which is why each slot button carries an explicit weekday prefix (see Part 8).
