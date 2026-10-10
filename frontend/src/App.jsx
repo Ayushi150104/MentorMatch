@@ -10,7 +10,7 @@ import { CancelBookingModal } from "./components/CancelBookingModal.jsx";
 import { HomeScreen } from "./components/HomeScreen.jsx";
 import { AuthScreen } from "./components/AuthScreen.jsx";
 import { Loading } from "./components/Loading.jsx";
-import { Topbar } from "./components/TopBar.jsx";
+import Topbar from "./components/TopBar.jsx";
 
 /**
  * Decode a JWT payload on the client without verifying the signature.
