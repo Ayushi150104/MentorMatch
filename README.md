@@ -4,10 +4,23 @@ A trial-class booking system built for the Codeyoung Full-Stack Engineer assignm
 
 Parents browse mentors, view availability in their own timezone, book a one-to-one trial, and receive a confirmation email with a live-class link. Mentors receive the same booking with the parent's name and contact. Both parties see times in both timezones.
 
+---
+
+## Live demo
+
+- **Frontend:** https://mentor-match-delta.vercel.app
+- **Backend API:** https://mentormatch-szul.onrender.com
+
+> The backend is hosted on Render's free tier and sleeps after 15 minutes of inactivity. The first request after a sleep takes ~30 seconds to wake the service.
+
+---
+
+## Tech stack
+
 - **Frontend:** React 18 + Vite
 - **Backend:** Node.js + Express 5
 - **Database:** MongoDB (Atlas or any replica set — transactions required)
-- **Email:** Nodemailer over SMTP (Gmail, Resend, or any SMTP provider)
+- **Email:** Brevo HTTP API
 
 ---
 
@@ -16,7 +29,7 @@ Parents browse mentors, view availability in their own timezone, book a one-to-o
 - Node.js 20.19+ or 22.12+
 - npm
 - MongoDB Atlas cluster, or any MongoDB deployment with a replica set (transactions require it)
-- An SMTP account for email. Optional — the app runs without it and logs sends instead.
+- A Brevo account for email. Optional — the app runs without it and logs sends instead.
 
 ---
 
@@ -60,15 +73,38 @@ JWT_SECRET=<generated-value>
 DEMO_MENTOR_PASSWORD=<your-choice>
 DEMO_PARENT_PASSWORD=<your-choice>
 
-# Optional — email. Leave SMTP_HOST empty to skip sending (logged instead).
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USER=you@example.com
-SMTP_PASS=<app-password>
-MAIL_FROM="MentorMatch <you@example.com>"
+# Optional — email via Brevo HTTP API. Leave BREVO_API_KEY empty to skip sending.
+BREVO_API_KEY=
+MAIL_FROM_EMAIL=
+MAIL_FROM_NAME=MentorMatch
 ```
 
 **`.env` is gitignored. Never commit it. Never expose it to the frontend.**
+
+#### Enabling email (optional)
+
+Emails are sent through Brevo's HTTP API on port 443 rather than SMTP, because some cloud hosts block outbound SMTP traffic.
+
+1. Sign up at [brevo.com](https://brevo.com) (free tier: 300 emails/day).
+2. Under **Senders, Domains & Dedicated IPs → Senders**, add and verify the address you want to send from. Brevo sends a confirmation link — click it.
+3. Under **SMTP & API → API Keys**, generate a new API key. Copy the `xkeysib-...` value.
+4. Set `BREVO_API_KEY`, `MAIL_FROM_EMAIL`, and `MAIL_FROM_NAME` in `.env`.
+
+If `BREVO_API_KEY` is unset, the mailer logs the would-be send and returns without throwing — the booking still succeeds. The app runs cleanly without email configuration.
+
+### 3b. Configure the frontend environment (only for deployment)
+
+Locally, the frontend proxies `/api` to `http://localhost:5000` via `vite.config.js`, so no frontend `.env` is needed for local development.
+
+For a deployed frontend, create `frontend/.env` (or set the variable in your host's dashboard, e.g. Vercel → Settings → Environment Variables):
+
+```dotenv
+VITE_API_BASE_URL=https://your-backend-url.onrender.com/api
+```
+
+`frontend/src/lib/api.js` reads this via `import.meta.env.VITE_API_BASE_URL` and falls back to `http://localhost:5000/api` if unset. After adding or changing this variable on Vercel, you must **redeploy** — Vite bakes env vars into the build at build time, not at runtime.
+
+The `VITE_` prefix is required by Vite — only variables with that prefix are exposed to the client bundle.
 
 ### 4. Seed demo data
 
@@ -123,7 +159,7 @@ backend/
     models/                # Mentor, Parent, Booking, DailyCapacity
     utils/time.js          # Temporal-based timezone + slot arithmetic
     emails/                # HTML + text templates
-    lib/mailer.js          # Nodemailer transport (cached)
+    lib/mailer.js          # Brevo HTTP API client
 
 frontend/
   src/
@@ -177,13 +213,15 @@ Cancellation decrements the counter in the same transaction. The counter is guar
 
 ### Email pipeline
 
-Two emails per booking — parent and mentor — sent via Nodemailer over SMTP.
+Two emails per booking — parent and mentor — sent through Brevo's HTTP API.
 
 - **Fired after the transaction commits**, not inside it. A DB rollback should not produce a confirmation for a booking that doesn't exist.
-- **Not awaited.** SMTP latency doesn't delay the HTTP response. Individual failures are logged but don't fail the request — the booking is the source of truth.
+- **Not awaited.** HTTP latency doesn't delay the response. Individual failures are logged but don't fail the request — the booking is the source of truth.
 - **Both timezones** in each email: recipient's own as the primary line, the other party's as muted reference.
 - **Dummy live-class link** included as a button and as a raw URL (for clients that strip buttons). The brief specifies the link is a placeholder — it does not need to resolve.
-- **Graceful degradation:** if `SMTP_HOST` is unset, the mailer logs the would-be send and returns without throwing, so the app runs without email configuration in development.
+- **Graceful degradation:** if `BREVO_API_KEY` is unset, the mailer logs the would-be send and returns without throwing, so the app runs without email configuration in development.
+
+**Why Brevo and not SMTP:** some cloud PaaS providers (including Render's free tier) block outbound traffic on SMTP ports 25, 465, and 587. Brevo's HTTP API runs on port 443, which is never blocked. Swapping the transport from Nodemailer/SMTP to Brevo's HTTP API is what makes email work in the deployed environment. See `backend/README.md` for details.
 
 ### Session restore
 
@@ -269,5 +307,6 @@ Per the assignment brief, the full AI-assisted session transcript is included as
 ## Notes
 
 - **Demo emails:** the seed uses `.test` domains, which don't resolve. Replace them in MongoDB Compass with real addresses for email testing.
-- **Email in development:** Gmail SMTP has a low daily limit and often classifies transactional mail as spam. For production, verify a domain and use a transactional provider (Resend, Postmark, SES). The mailer is provider-agnostic — only `.env` changes.
+- **Email on cloud hosts:** some PaaS providers block outbound SMTP. Brevo's HTTP API on port 443 works everywhere. If you switch providers later, prefer one with an HTTP API.
+- **Brevo sender verification:** the `MAIL_FROM_EMAIL` address must be verified under _Senders, Domains & Dedicated IPs_ in Brevo before any send will succeed.
 - **Atlas transactions:** a standalone MongoDB (installed locally without a replica set) will reject the booking transaction. Use Atlas or configure a single-node replica set.

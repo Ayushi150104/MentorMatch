@@ -6,7 +6,7 @@ Express 5 + Mongoose API for the MentorMatch trial-class booking system. Handles
 - **Framework:** Express 5
 - **Database:** MongoDB (replica set required — transactions)
 - **Auth:** JWT (HS256), bcryptjs password hashing
-- **Email:** Nodemailer over SMTP
+- **Email:** Brevo HTTP API
 - **Time:** `@js-temporal/polyfill` (IANA tz database)
 
 ---
@@ -34,23 +34,34 @@ The server validates its environment, connects to MongoDB, awaits index initiali
 
 All variables are read from `backend/.env`, which is gitignored. Two are required at boot; the rest are optional.
 
-| Variable               | Required | Purpose                                                                              |
-| ---------------------- | -------- | ------------------------------------------------------------------------------------ |
-| `PORT`                 | No       | HTTP port. Defaults to `5000`.                                                       |
-| `MONGODB_URI`          | **Yes**  | Must start with `mongodb://` or `mongodb+srv://`.                                    |
-| `JWT_SECRET`           | **Yes**  | Signing key. Must be at least 32 characters.                                         |
-| `DEMO_MENTOR_PASSWORD` | For seed | Shared password for all seeded mentor accounts. 8–72 bytes.                          |
-| `DEMO_PARENT_PASSWORD` | For seed | Shared password for all seeded parent accounts. 8–72 bytes.                          |
-| `SMTP_HOST`            | No       | SMTP relay host. If unset, emails are logged but not sent.                           |
-| `SMTP_PORT`            | No       | Defaults to `587`. Port `465` enables implicit TLS.                                  |
-| `SMTP_USER`            | No       | SMTP username. Required by most providers.                                           |
-| `SMTP_PASS`            | No       | SMTP password or API key.                                                            |
-| `MAIL_FROM`            | No       | `From:` header. Defaults to a `.local` placeholder.                                  |
-| `APP_URL`              | No       | Base URL used in email links. Defaults to `http://localhost:5173`.                   |
-| `CLASS_BASE_URL`       | No       | Base URL for the dummy class link. Defaults to `https://meet.mentormatch.com/class`. |
-| `SUPPORT_EMAIL`        | No       | Shown in email footers. Defaults to `support@mentormatch.com`.                       |
+| Variable               | Required | Purpose                                                                                                                                               |
+| ---------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PORT`                 | No       | HTTP port. Defaults to `5000`.                                                                                                                        |
+| `MONGODB_URI`          | **Yes**  | Must start with `mongodb://` or `mongodb+srv://`.                                                                                                     |
+| `JWT_SECRET`           | **Yes**  | Signing key. Must be at least 32 characters.                                                                                                          |
+| `DEMO_MENTOR_PASSWORD` | For seed | Shared password for all seeded mentor accounts. 8–72 bytes.                                                                                           |
+| `DEMO_PARENT_PASSWORD` | For seed | Shared password for all seeded parent accounts. 8–72 bytes.                                                                                           |
+| `BREVO_API_KEY`        | No       | Brevo HTTP API key. If unset, emails are logged but not sent. Get it from [app.brevo.com/settings/keys/api](https://app.brevo.com/settings/keys/api). |
+| `MAIL_FROM_EMAIL`      | No       | The `From:` address. Must be verified as a sender in Brevo.                                                                                           |
+| `MAIL_FROM_NAME`       | No       | Display name for the `From:` header. Defaults to `MentorMatch`.                                                                                       |
+| `APP_URL`              | No       | Base URL used in email links. Defaults to `http://localhost:5173`.                                                                                    |
+| `CLASS_BASE_URL`       | No       | Base URL for the dummy class link. Defaults to `https://meet.mentormatch.com/class`.                                                                  |
+| `SUPPORT_EMAIL`        | No       | Shown in email footers. Defaults to `support@mentormatch.com`.                                                                                        |
 
 `validateEnvironment()` runs at boot and fails fast if `MONGODB_URI` or `JWT_SECRET` is missing, malformed, or too short.
+
+### Email setup
+
+Emails are sent through Brevo's HTTP API (port 443) rather than SMTP (port 587/465). This is deliberate — some cloud hosts block outbound SMTP traffic, and the HTTP API works everywhere HTTPS does.
+
+To enable email:
+
+1. Sign up at [brevo.com](https://brevo.com) (free tier: 300 emails/day).
+2. Under **Senders, Domains & Dedicated IPs → Senders**, add and verify the address you want to send from. Brevo sends a confirmation link — click it.
+3. Under **SMTP & API → API Keys**, generate a new API key. Copy the `xkeysib-...` value.
+4. Set `BREVO_API_KEY`, `MAIL_FROM_EMAIL`, and `MAIL_FROM_NAME` in `.env`.
+
+If `BREVO_API_KEY` is unset, the mailer logs the would-be send and returns `{ skipped: true }` without throwing, so the app runs locally without email configuration.
 
 ---
 
@@ -82,7 +93,7 @@ backend/
       time.js                 # Temporal slot arithmetic, DST handling
       passwords.js            # bcryptjs hash + compare
     lib/
-      mailer.js               # Nodemailer transport (cached)
+      mailer.js               # Brevo HTTP API client (no SDK dependency)
     emails/
       bookingConfirmation.js  # HTML + plain-text templates
     scripts/
@@ -325,7 +336,9 @@ Two emails are sent per booking — one to the parent, one to the mentor. Both a
 
 Individual sends are wrapped in `Promise.allSettled` so a failure to reach the parent doesn't cancel the send to the mentor.
 
-If `SMTP_HOST` is unset, the mailer logs the would-be send and returns `{ skipped: true }` instead of throwing. This lets the app run in development without email configuration.
+If `BREVO_API_KEY` is unset, the mailer logs the would-be send and returns `{ skipped: true }` instead of throwing. This lets the app run in development without email configuration.
+
+Brevo is called over its HTTP API (port 443) via `fetch`, not over SMTP. This is deliberate: some cloud hosts (Render's free tier among them) block outbound SMTP ports, and an HTTP API works anywhere HTTPS does. The tradeoff is a dependency on Brevo's API schema, which is documented and stable.
 
 Both emails render the time in **both** timezones: the recipient's own as the primary line, the other party's as muted reference. The dummy class link is included as both a button and a raw URL.
 
@@ -390,7 +403,8 @@ These run without a database.
 - **MongoDB must be a replica set.** Standalone MongoDB rejects `session.withTransaction()`. Atlas provides a replica set by default; a local install needs `--replSet` configuration.
 - **CORS is currently open (`cors()` with no options).** For production, restrict to the frontend origin.
 - **`JWT_SECRET` must be at least 32 characters.** Generate with `node -p "require('node:crypto').randomBytes(48).toString('base64url')"`.
-- **Email delivery.** Gmail SMTP works for development but is rate-limited and often classified as spam. Production should use a transactional provider (Resend, Postmark, SES) with a verified sending domain. The mailer is provider-agnostic — only `.env` changes.
+- **Email on cloud hosts.** Some PaaS providers block outbound SMTP traffic on ports 25, 465, and 587. Brevo's HTTP API on port 443 sidesteps this entirely. If you switch to a different email provider later, prefer one with an HTTP API unless you've confirmed SMTP is allowed.
+- **Brevo sender verification.** The `MAIL_FROM_EMAIL` address must be verified under _Senders, Domains & Dedicated IPs_ in Brevo before any send will succeed. Unverified sends return `400 Sender not valid`.
 - **`.env` is gitignored.** Never commit it, and never expose any of its values to the frontend.
 
 ---
