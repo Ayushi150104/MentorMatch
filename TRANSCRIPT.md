@@ -1,8 +1,8 @@
 MentorMatch — AI Development Transcript and Implementation Notes
 
-Candidate: Ayushi Choudhary
-Institute: Swami Vivekananda Institute of Science & Technology (SVIST)
-Assignment: Full-Stack Engineer — Trial Class Booking System
+**Candidate**: Ayushi Choudhary
+**Institute**: Haldia Institute of Technology (HIT)
+**Assignment**: Full-Stack Engineer — Trial Class Booking System
 AI assistant recorded in this document: DeepSeek (chat.deepseek.com)
 
 Note on AI usage
