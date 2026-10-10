@@ -4,6 +4,7 @@ import {
   Check,
   Clock3,
   LoaderCircle,
+  Mail,
 } from "lucide-react";
 import { todayInTimezone } from "../lib/calendarDate.js";
 import { formatInstant, formatSlotWithDay } from "../lib/formatters.js";
@@ -76,6 +77,17 @@ export function BookingModal({
             <span>CONFIRMATION ID</span>
             <code>{bookingFlow.booking.bookingId}</code>
           </div>
+          <p className="mx-auto mt-5 flex max-w-85 gap-4 items-center justify-center mb-4 rounded-[10px] bg-emerald-500/10 px-3.5 py-2.5 text-left text-[12px] leading-relaxed text-gray-400">
+            <Mail
+              size={18}
+              aria-hidden="true"
+              className="mt-0.5 shrink-0 text-emerald-400 font-bold"
+            />
+            <span>
+              A confirmation email is on its way — check your spam folder if you
+              don't see it within the hour.
+            </span>
+          </p>
           <button
             className="button button-primary button-full"
             onClick={onClose}
