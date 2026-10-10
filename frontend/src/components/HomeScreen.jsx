@@ -51,17 +51,32 @@ export function HomeScreen({ onSignIn, onJoin }) {
             </span>
           </a>
           <nav className="home-nav" aria-label="Main navigation">
-            <a href="#mentors">Mentors</a>
+            <a href="#mentors" className="hidden md:block">
+              Mentors
+            </a>
             <ThemeToggle compact />
-            <button className="home-nav-signin" onClick={onSignIn}>
-              Sign in
-            </button>
-            <button
-              className="button button-primary home-nav-join"
-              onClick={() => onJoin("register")}
-            >
-              Join MentorMatch <ArrowRight size={15} />
-            </button>
+            <div className="hidden md:block">
+              <button className="home-nav-signin" onClick={onSignIn}>
+                Sign in
+              </button>
+              <button
+                className="button ml-4 button-primary home-nav-join"
+                onClick={() => onJoin("register")}
+              >
+                Join MentorMatch <ArrowRight size={15} />
+              </button>
+            </div>
+            <div className="block md:hidden">
+              <button className="home-nav-signin" onClick={onSignIn}>
+                Sign in
+              </button>
+              <button
+                className="button button-primary ml-2 home-nav-join"
+                onClick={() => onJoin("register")}
+              >
+                Join
+              </button>
+            </div>
           </nav>
         </header>
 
